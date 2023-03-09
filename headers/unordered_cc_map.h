@@ -1,0 +1,307 @@
+#include "hazard_ptr.h"
+#include "hashers.h"
+
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+#include <functional>
+#include <optional>
+
+namespace detail {
+constexpr uint32_t n_bit_mask(int n) {
+    return (1 << n) - 1;
+}
+
+constexpr uint32_t power(int n) {
+    return 1 << n;
+}
+
+size_t bits(void *ptr) {
+    return reinterpret_cast<size_t>(ptr);
+}
+
+}  // namespace detail
+
+using namespace detail;
+using namespace hashers;
+// declarations
+
+enum class AcceptorState { kEmpty, kKeyValue, kCell };
+enum class InjectorState { kEmpty, kKeyValue, kCell };
+
+template <class Key, class Value, class Hasher = DefaultHasher<Key>>
+class HashTree {
+    typedef std::pair<Key, Value> KV;
+
+    struct Root {
+        size_t bit_count;
+        std::atomic<void *> ptrs[];
+    };
+
+    struct Cell {
+        std::atomic<void *> lhs{};
+        std::atomic<void *> rhs{};
+        // nullptr - std::pair<Key, Value>*, free
+        // 1 lowest bit is 0 and not nullptr - std::pair<Key, Value>*, taken
+        // 1 lowest bit is 1 - Cell*
+        ~Cell();
+    };
+
+    struct TreeTraverser {
+        uint32_t hash;
+        int depth = -1;
+        
+        int advance(int bit_count = 1) {
+            int index = hash & n_bit_mask(bit_count);
+            hash = hash >> bit_count;
+            depth++;
+            return index;
+        }
+    };
+
+public:
+    HashTree(size_t capacity, Hasher hasher = Hasher());
+    bool Put(Key key, Value value);
+    std::optional<Value> Get(const Key &key);
+    bool Erase(const Key &key);
+    ~HashTree();
+
+    HashTree(const HashTree &other) = delete;
+    HashTree operator=(const HashTree &other) = delete;
+    HashTree(HashTree &&other) = delete;
+    HashTree operator=(HashTree &&other) = delete;
+
+private:
+    std::pair<AcceptorState, InjectorState> deliberate_state(void *, void *);
+    void free_root(Root *ptr);
+    std::atomic<Root *> root_;
+    Hasher hasher_;
+
+    std::atomic<uint8_t>
+        rehash_;  // acts as try-lock mutex, allowing only one thread to do rehashing at any time
+    std::vector<Root *> old_roots_;
+    // old roots aren't deleted in this version of the map,
+    // ensuring memory safety at significant memory cost of
+    // ~1.5 * elem_count * sizeof(void *) overhead
+};
+
+// definitions
+
+template <class Key, class Value, class Hasher>
+void HashTree<Key, Value, Hasher>::free_root(Root *ptr) {
+    for (size_t i = 0; i < power(ptr->bit_count); ++i) {
+        if (bits(ptr->ptrs[i]) & 1) {
+            HashTree<Key, Value, Hasher>::Cell * cptr = reinterpret_cast<Cell *>(bits(ptr->ptrs[i]) & ~7);
+            delete cptr;
+        } else if (ptr->ptrs[i] != nullptr) {
+            KV* kv = reinterpret_cast<KV *>(ptr->ptrs[i].load());
+            delete kv;
+        }
+    }
+    free(ptr);
+}
+
+
+template <class Key, class Value, class Hasher>
+HashTree<Key, Value, Hasher>::HashTree(size_t capacity, Hasher hasher) : hasher_(hasher) {
+    size_t bit_count = 0;
+    size_t root_size = 1;
+    while (root_size < capacity) {
+        root_size <<= 1;
+        bit_count++;
+    }
+    Root *r_ptr = reinterpret_cast<Root *>(malloc(sizeof(Root) + sizeof(std::atomic<void *>) * root_size));
+    root_.store(r_ptr);
+    r_ptr->bit_count = bit_count;
+    for (size_t i = 0; i < root_size; ++i) {
+        r_ptr->ptrs[i] = nullptr;
+    }
+}
+
+template <class Key, class Value, class Hasher>
+bool HashTree<Key, Value, Hasher>::Put(Key key, Value value) {
+    TreeTraverser traverser{hasher_(key)};
+    Root *root = root_.load(std::memory_order_relaxed);
+    std::atomic<void *> *ptr2atomic = &(root->ptrs[traverser.advance(root->bit_count)]);
+
+    void *desired = new KV(std::move(key), std::move(value));
+    void *expected = nullptr;
+
+    int migration_index = 0;
+
+    void *second_extra = nullptr;
+    while (true) {
+        while (!ptr2atomic->compare_exchange_weak(expected, desired)) {
+            auto [acc, inj] = deliberate_state(expected, desired);
+            if (inj == InjectorState::kCell) {
+                Release();
+                Cell *discard = reinterpret_cast<Cell *>(bits(desired) & ~1);
+                reinterpret_cast<std::atomic<void *>*>(discard)[migration_index].store(nullptr);
+                delete discard;
+                desired = second_extra;
+                second_extra = nullptr;
+            }
+            if (acc == AcceptorState::kKeyValue) {
+                void *ptr = Acquire(ptr2atomic);
+                if (bits(ptr) & 1) {
+                    Release();
+                    ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(bits(ptr) & ~1)[traverser.advance()]);
+                    expected = nullptr;
+                } else {
+                    KV *acc_ptr = reinterpret_cast<KV *>(ptr);
+                    KV *inj_ptr = reinterpret_cast<KV *>(desired);
+                    if (acc_ptr->first == inj_ptr->first) {
+                        Release();
+                        expected = ptr;
+                        continue;
+                    }
+                    // WE DON'T RELEASE HERE, IT'S OMEGA-3 LEVEL OF IMPORTANT
+                    Cell *new_cell = new Cell;
+                    migration_index = (hasher_(acc_ptr->first) >> (traverser.depth + root->bit_count)) & 1;
+                    second_extra = desired;
+                    reinterpret_cast<std::atomic<void *>*>(new_cell)[migration_index].store(ptr);
+                    desired = reinterpret_cast<void *>(bits(new_cell) | 1);
+                    expected = ptr;
+                }
+            } else if (acc == AcceptorState::kCell) {
+                void *ptr = ptr2atomic->load();
+                ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(bits(ptr) & ~1)[traverser.advance()]);
+                expected = nullptr;
+            } else {
+                assert(false);
+            }
+        }
+
+        if (second_extra == nullptr) {
+            break;
+        } else {
+            Release();
+            ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(bits(desired) & ~1)[traverser.advance()]);
+            expected = nullptr;
+            desired = second_extra;
+            second_extra = nullptr;
+        }
+    }
+
+    // cleanup replaced KV pair if there is one
+    if (expected != nullptr) {
+        Retire(reinterpret_cast<KV *>(expected));
+        return false;
+    }
+    return true;
+}
+
+template <class Key, class Value, class Hasher>
+std::optional<Value> HashTree<Key, Value, Hasher>::Get(const Key &key) {
+    Root *root = root_.load(std::memory_order_relaxed);
+    TreeTraverser traverser{hasher_(key)};
+    std::atomic<void *> *ptr2atomic = &(root->ptrs[traverser.advance(root->bit_count)]);
+
+    while (true) {
+        void *ptr = Acquire(ptr2atomic);
+        if (ptr == nullptr) {
+            Release();
+            return std::nullopt;
+        }
+        if (bits(ptr) & 1) {
+            Release();
+            ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(bits(ptr) & ~1)[traverser.advance()]);
+            continue;
+        }
+        KV *kv = reinterpret_cast<KV *>(ptr);
+        std::optional<Value> ret_val;
+        if (kv->first == key) {
+            ret_val = kv->second;
+        }
+        Release();
+        return ret_val;
+    }
+}
+
+template <class Key, class Value, class Hasher>
+std::pair<AcceptorState, InjectorState> HashTree<Key, Value, Hasher>::deliberate_state(
+    void *expected, void *desired) {
+    AcceptorState acc;
+    InjectorState inj;
+    if (expected == nullptr) {
+        acc = AcceptorState::kEmpty;
+    } else if (bits(expected) & 1) {
+        acc = AcceptorState::kCell;
+    } else {
+        acc = AcceptorState::kKeyValue;
+    }
+    if (bits(desired) & 1) {
+        inj = InjectorState::kCell;
+    } else if (desired == nullptr) {
+        inj = InjectorState::kEmpty;
+    } else {
+        inj = InjectorState::kKeyValue;
+    }
+    return {acc, inj};
+}
+
+template <class Key, class Value, class Hasher>
+bool HashTree<Key, Value, Hasher>::Erase(const Key &key) {
+    TreeTraverser traverser{hasher_(key)};
+    Root *root = root_.load(std::memory_order_relaxed);
+    std::atomic<void *> *ptr2atomic = &(root->ptrs[traverser.advance(root->bit_count)]);
+
+    while (true) {
+        void *ptr = ptr2atomic->load();
+        if (ptr == nullptr) {
+            return false;
+        }
+        if (bits(ptr) & 1) {
+            ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(bits(ptr) & ~1)[traverser.advance()]);
+            continue;
+        }
+        ptr = Acquire(ptr2atomic);
+        if (bits(ptr) & 1) {
+            Release();
+            ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(bits(ptr) & ~1)[traverser.advance()]);
+            continue;
+        } else {
+            KV *kv = reinterpret_cast<KV *>(ptr);
+            if (kv->first != key) {
+                Release();
+                return false;
+            }
+            bool cas_success = ptr2atomic->compare_exchange_strong(ptr, nullptr);
+            if (cas_success) {
+                Retire(kv);
+                Release();
+                return true;
+            }
+            Release();
+        }
+    }
+}
+
+template <class Key, class Value, class Hasher>
+HashTree<Key, Value, Hasher>::Cell::~Cell() {
+    if (bits(lhs) & 1) {
+        delete reinterpret_cast<Cell *>(bits(lhs) & ~7UL);
+    } else if (lhs != nullptr) {
+        delete reinterpret_cast<KV *>(lhs.load());
+    }
+    if (bits(rhs) & 1) {
+        delete reinterpret_cast<Cell *>(bits(rhs) & ~7UL);
+    } else if (rhs != nullptr) {
+        delete reinterpret_cast<KV *>(rhs.load());
+    }
+}
+
+template <class Key, class Value, class Hasher>
+HashTree<Key, Value, Hasher>::~HashTree() {
+    if (old_roots_.empty()) {
+        free_root(root_.load());
+        return;
+    }
+    delete old_roots_[0];
+    for (size_t i = 1; old_roots_.size(); ++i) {
+        for (size_t j = 0; j < power(old_roots_[i]->bit_count); ++j) {
+            old_roots_[i]->ptrs[j] = nullptr;
+        }
+        free_root(old_roots_[i]);
+    }
+}
