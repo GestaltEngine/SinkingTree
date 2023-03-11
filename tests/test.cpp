@@ -10,6 +10,7 @@
 
 TEST_CASE("Basic") {
     {
+        RegisterThread();
         HashTree<int, int> map(16);
         REQUIRE(map.Put(1, 1));
         REQUIRE(map.Put(2, 2));
@@ -23,10 +24,12 @@ TEST_CASE("Basic") {
         REQUIRE(map.Erase(3));
         REQUIRE(map.Erase(2));
         REQUIRE(map.Erase(1));
+        UnregisterThread();
     }
 }
 
 TEST_CASE("Mix") {
+    RegisterThread();
     HashTree<int, int> my(16);
     std::unordered_map<int, int> baseline;
     std::mt19937 gen(0);
@@ -48,9 +51,11 @@ TEST_CASE("Mix") {
             REQUIRE(res.has_value() == (base != baseline.end()));
         }
     }
+    UnregisterThread();
 }
 
 TEST_CASE("A lot of inserts") {
+    RegisterThread();
     HashTree<int, int> my(16);
     for (int i = 0; i < 1'000'000; ++i) {
         REQUIRE(my.Put(i, i));
@@ -58,4 +63,5 @@ TEST_CASE("A lot of inserts") {
     for (int i = 0; i < 1'000'000; ++i) {
         REQUIRE(my.Erase(i));
     }
+    UnregisterThread();
 }

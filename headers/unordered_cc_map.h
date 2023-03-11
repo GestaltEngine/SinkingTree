@@ -210,6 +210,7 @@ std::optional<Value> HashTree<Key, Value, Hasher>::Get(const Key &key) {
         if (bits(ptr) & 1) {
             ptr2atomic =
                 &(reinterpret_cast<std::atomic<void *> *>(bits(ptr) & ~1)[traverser.advance()]);
+            ptr = ptr2atomic->load(std::memory_order_relaxed);
             continue;
         }
         ptr = Acquire(ptr2atomic);
@@ -220,6 +221,7 @@ std::optional<Value> HashTree<Key, Value, Hasher>::Get(const Key &key) {
             Release();
             ptr2atomic =
                 &(reinterpret_cast<std::atomic<void *> *>(bits(ptr) & ~1)[traverser.advance()]);
+            ptr = ptr2atomic->load(std::memory_order_relaxed);
             continue;
         }
         KV *kv = reinterpret_cast<KV *>(ptr);

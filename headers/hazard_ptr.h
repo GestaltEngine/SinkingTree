@@ -1,21 +1,38 @@
 #pragma once
 
 #include <atomic>
+#include <cassert>
 #include <memory>
 #include <functional>
 #include <mutex>
 #include <unordered_set>
 #include <iostream>
 
-thread_local std::atomic<void*> hazard_ptr{nullptr};  // currently captured pointer
+namespace {
 
 struct ThreadState {
     std::atomic<void*>* ptr;
 };
+
+struct RetiredPtr {
+    void* value;
+    std::function<void()> deleter;
+    RetiredPtr* next;
+};  // mb deque would be bettererester?
+
+
+thread_local std::atomic<void*> hazard_ptr{nullptr};  // currently captured pointer
 thread_local ThreadState* registry = nullptr;
 
 std::mutex threads_lock;
 std::unordered_set<ThreadState*> threads;  // pointers to pointers to protected atomic pointers
+
+std::mutex scan_lock; 
+std::atomic<RetiredPtr*> free_list = nullptr;
+std::atomic<int> free_list_size_approx = 0;
+const int kMaxFreeListLength = 100;
+
+}  // namespace
 
 // Acquire атомарно читает значение *ptr и добавляет это значение
 // в множество защищённых указателей.
@@ -26,6 +43,7 @@ std::unordered_set<ThreadState*> threads;  // pointers to pointers to protected 
 // удалять этот объект напрямую через delete.
 template <class T>
 T* Acquire(std::atomic<T*>* ptr) {
+    assert(registry != nullptr);
     auto value = ptr->load();
     do {
         hazard_ptr.store(value);
@@ -41,21 +59,9 @@ T* Acquire(std::atomic<T*>* ptr) {
 
 // Release удаляет текущий активный указатель из множества защищённых.
 inline void Release() {
+    assert(registry != nullptr);
     hazard_ptr.store(nullptr);
 }
-
-struct RetiredPtr {
-    void* value;
-    std::function<void()> deleter;
-    RetiredPtr* next;
-};  // mb deque would be bettererester?
-
-// Same bs as with ThreadLocal (undefinable lifespans)
-std::atomic<RetiredPtr*> free_list = nullptr;
-std::atomic<int> free_list_size_approx = 0;
-const int kMaxFreeListLength = 100;
-
-std::mutex scan_lock;
 
 void ScanFreeList() {
     free_list_size_approx.store(0);
@@ -103,6 +109,7 @@ void ScanFreeList() {
 // *value через атомарные переменные.
 template <class T, class Deleter = std::default_delete<T>>
 void Retire(T* value, Deleter deleter = {}) {
+    assert(registry != nullptr);
     auto old_free_list = free_list.load();
     auto rptr = new RetiredPtr;
     rptr->value = value;
