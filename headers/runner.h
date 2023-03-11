@@ -13,13 +13,17 @@ public:
 
     template <class Function, class... Args>
     void Do(Function&& func, Args&&... args) {
-        threads_.emplace_back([this](Function&& func, Args&&... args) mutable {
-            RegisterThread();
-            while (iteration_.fetch_add(1, std::memory_order::relaxed) < num_iterations_) {
-                func(std::forward<Args>(args)...);
-            }
-            UnregisterThread();
-        }, std::forward<Function>(func), std::forward<Args>(args)...);
+        threads_.emplace_back(
+            [this](Function&& func, Args&&... args) mutable {
+                RegisterThread();
+                while (iteration_.fetch_add(100, std::memory_order::relaxed) < num_iterations_) {
+                    for (int i = 0; i < 100; ++i) {
+                        func(std::forward<Args>(args)...);
+                    }
+                }
+                UnregisterThread();
+            },
+            std::forward<Function>(func), std::forward<Args>(args)...);
     }
 
     void Wait() {

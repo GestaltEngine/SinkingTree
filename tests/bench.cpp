@@ -16,7 +16,7 @@ TEST_CASE( "Benchmark my map" ) {
     static constexpr auto kNumIterations = 100'000;
 
     BENCHMARK("RandomInsertions:" + std::to_string(kNumThreads)) {
-        HashTree<int, int> map(kNumIterations);
+        HashTree<int, int> map(2 * kNumIterations);
         Runner runner{kNumIterations};
         for (auto i : std::views::iota(0u, kNumThreads)) {
             Random rand{kSeed + 10 * i};
@@ -25,7 +25,7 @@ TEST_CASE( "Benchmark my map" ) {
     };
 
     BENCHMARK("RandomInsertions(std):" + std::to_string(kNumThreads)) {
-        Baseline<int, int> map(kNumIterations);
+        Baseline<int, int> map(2 * kNumIterations);
         Runner runner{kNumIterations};
         for (auto i : std::views::iota(0u, kNumThreads)) {
             Random rand{kSeed + 10 * i};

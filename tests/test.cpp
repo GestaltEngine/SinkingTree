@@ -49,3 +49,13 @@ TEST_CASE("Mix") {
         }
     }
 }
+
+TEST_CASE("A lot of inserts") {
+    HashTree<int, int> my(16);
+    for (int i = 0; i < 1'000'000; ++i) {
+        REQUIRE(my.Put(i, i));
+    }
+    for (int i = 0; i < 1'000'000; ++i) {
+        REQUIRE(my.Erase(i));
+    }
+}
