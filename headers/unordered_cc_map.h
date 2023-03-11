@@ -8,16 +8,16 @@
 #include <optional>
 
 namespace {
-constexpr uint32_t n_bit_mask(int n) {
+constexpr HashType n_bit_mask(int n) {
     return (1 << n) - 1;
 }
 
-constexpr uint32_t power(int n) {
+constexpr size_t power(int n) {
     return 1 << n;
 }
 
-size_t bits(void *ptr) {
-    return reinterpret_cast<size_t>(ptr);
+uintptr_t bits(void *ptr) {
+    return reinterpret_cast<uintptr_t>(ptr);
 }
 
 }  // namespace
@@ -47,7 +47,7 @@ class HashTree {
     };
 
     struct TreeTraverser {
-        uint32_t hash;
+        HashType hash;
         int depth = -1;
 
         int advance(int bit_count = 1) {
@@ -59,7 +59,7 @@ class HashTree {
     };
 
 public:
-    HashTree(size_t capacity, Hasher hasher = Hasher());
+    HashTree(size_t capacity = 2, Hasher hasher = Hasher());
     bool Put(Key key, Value value);
     std::optional<Value> Get(const Key &key);
     bool Erase(const Key &key);
@@ -82,6 +82,7 @@ private:
     // old roots aren't deleted in this version of the map,
     // ensuring memory safety at significant memory cost of
     // ~1.5 * elem_count * sizeof(void *) overhead
+    std::atomic<size_t> cell_count_[8 * sizeof(HashType)];
 };
 
 // definitions
@@ -102,9 +103,10 @@ void HashTree<Key, Value, Hasher>::free_root(Root *ptr) {
 }
 
 template <class Key, class Value, class Hasher>
-HashTree<Key, Value, Hasher>::HashTree(size_t capacity, Hasher hasher) : hasher_(hasher) {
-    size_t bit_count = 0;
-    size_t root_size = 1;
+HashTree<Key, Value, Hasher>::HashTree(size_t capacity, Hasher hasher)
+    : hasher_(hasher), old_roots_(64, nullptr) {
+    size_t bit_count = 1;
+    size_t root_size = 2;
     while (root_size < capacity) {
         root_size <<= 1;
         bit_count++;
@@ -180,6 +182,7 @@ bool HashTree<Key, Value, Hasher>::Put(Key key, Value value) {
             break;
         } else {
             Release();
+            cell_count_[root->bit_count + traverser.depth - 1].fetch_add(1);
             ptr2atomic =
                 &(reinterpret_cast<std::atomic<void *> *>(bits(desired) & ~1)[traverser.advance()]);
             expected = nullptr;
@@ -289,7 +292,8 @@ bool HashTree<Key, Value, Hasher>::Erase(const Key &key) {
                 Release();
                 return false;
             }
-            bool cas_success = ptr2atomic->compare_exchange_strong(ptr, nullptr, std::memory_order_relaxed);
+            bool cas_success =
+                ptr2atomic->compare_exchange_strong(ptr, nullptr, std::memory_order_relaxed);
             if (cas_success) {
                 Retire(kv);
                 Release();
@@ -316,15 +320,14 @@ HashTree<Key, Value, Hasher>::Cell::~Cell() {
 
 template <class Key, class Value, class Hasher>
 HashTree<Key, Value, Hasher>::~HashTree() {
-    if (old_roots_.empty()) {
-        free_root(root_.load());
-        return;
-    }
-    delete old_roots_[0];
-    for (size_t i = 1; old_roots_.size(); ++i) {
-        for (size_t j = 0; j < power(old_roots_[i]->bit_count); ++j) {
-            old_roots_[i]->ptrs[j] = nullptr;
+    for (Root *rptr : old_roots_) {
+        if (rptr == nullptr) {
+            continue;
         }
-        free_root(old_roots_[i]);
+        for (size_t j = 0; j < power(rptr->bit_count); ++j) {
+            rptr->ptrs[j] = nullptr;
+        }
+        free_root(rptr);
     }
+    free_root(root_.load());
 }

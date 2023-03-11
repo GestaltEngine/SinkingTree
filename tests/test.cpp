@@ -56,7 +56,7 @@ TEST_CASE("Mix") {
 
 TEST_CASE("A lot of inserts") {
     RegisterThread();
-    HashTree<int, int> my(16);
+    HashTree<int, int> my;
     for (int i = 0; i < 1'000'000; ++i) {
         REQUIRE(my.Put(i, i));
     }
