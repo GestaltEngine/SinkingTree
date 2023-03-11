@@ -8,15 +8,14 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/benchmark/catch_benchmark.hpp>
 
-
 static constexpr auto kSeed = 14753334;
 
-TEST_CASE( "Benchmark my map" ) {
+TEST_CASE("Benchmark inserts") {
     const auto kNumThreads = GENERATE(2u, 4u, 8u);
     static constexpr auto kNumIterations = 100'000;
 
     BENCHMARK("RandomInsertions:" + std::to_string(kNumThreads)) {
-        HashTree<int, int> map(2 * kNumIterations);
+        HashTree<int, int> map(kNumIterations);
         Runner runner{kNumIterations};
         for (auto i : std::views::iota(0u, kNumThreads)) {
             Random rand{kSeed + 10 * i};
@@ -25,11 +24,46 @@ TEST_CASE( "Benchmark my map" ) {
     };
 
     BENCHMARK("RandomInsertions(std):" + std::to_string(kNumThreads)) {
-        Baseline<int, int> map(2 * kNumIterations);
+        Baseline<int, int> map(kNumIterations);
         Runner runner{kNumIterations};
         for (auto i : std::views::iota(0u, kNumThreads)) {
             Random rand{kSeed + 10 * i};
             runner.Do([&map, rand]() mutable { map.Put(rand(), 1); });
+        }
+    };
+}
+
+TEST_CASE("Benchmark reads") {
+    const auto kNumThreads = GENERATE(2u, 4u, 8u);
+    const auto kSize = GENERATE(100, 1'000, 10'000);
+    static constexpr auto kNumIterations = 100'000;
+
+    BENCHMARK("RandomReads: " + std::to_string(kNumThreads) + ", " + std::to_string(kSize)) {
+        HashTree<int, int> map(kNumIterations);
+        RegisterThread();
+
+        for (int i = 0; i < kSize; ++i) {
+            map.Put(i, i);
+        }
+        UnregisterThread();
+        Runner runner{kNumIterations};
+        for (auto i : std::views::iota(0u, kNumThreads)) {
+            Random rand{kSeed + 10 * i};
+            runner.Do([&map, rand]() mutable { map.Get(rand()); });
+        }
+    };
+
+    BENCHMARK("RandomReads(std):" + std::to_string(kNumThreads) + ", " +
+              std::to_string(kSize)) {
+        Baseline<int, int> map(kNumIterations);
+
+        for (int i = 0; i < kSize; ++i) {
+            map.Put(i, i);
+        }
+        Runner runner{kNumIterations};
+        for (auto i : std::views::iota(0u, kNumThreads)) {
+            Random rand{kSeed + 10 * i};
+            runner.Do([&map, rand]() mutable { map.Get(rand()); });
         }
     };
 }

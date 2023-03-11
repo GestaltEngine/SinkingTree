@@ -15,11 +15,11 @@ public:
     }
     std::optional<Value> Get(const Key& key) {
         std::lock_guard lock(mutex_);
-        auto res = map_.find();
+        auto res = map_.find(key);
         if (res == map_.end()) {
             return std::nullopt;
         }
-        return *res;
+        return res->second;
     }
     bool Erase(const Key& key) {
         std::lock_guard lock(mutex_);
