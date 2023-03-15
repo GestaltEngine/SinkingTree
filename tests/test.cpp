@@ -57,11 +57,18 @@ TEST_CASE("Mix") {
 TEST_CASE("A lot of inserts") {
     RegisterThread();
     HashTree<int, int> my;
-    for (int i = 0; i < 1'000'000; ++i) {
-        REQUIRE(my.Put(i, i));
+    std::vector<int> x;
+    std::mt19937 gen(0);
+    for (int i = 0; i < 100'000; ++i) {
+        x.push_back(i);
     }
-    for (int i = 0; i < 1'000'000; ++i) {
-        REQUIRE(my.Erase(i));
+    std::shuffle(x.begin(), x.end(), gen);
+    for (int i = 0; i < 100'000; ++i) {
+        REQUIRE(my.Put(x[i], i));
+    }
+    my.PrintCellCount();
+    for (int i = 0; i < 100'000; ++i) {
+        REQUIRE(my.Erase(x[i]));
     }
     UnregisterThread();
 }

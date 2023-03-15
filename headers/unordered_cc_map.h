@@ -69,6 +69,7 @@ public:
     HashTree operator=(const HashTree &other) = delete;
     HashTree(HashTree &&other) = delete;
     HashTree operator=(HashTree &&other) = delete;
+    void PrintCellCount();
 
 private:
     std::pair<AcceptorState, InjectorState> deliberate_state(void *, void *);
@@ -330,4 +331,12 @@ HashTree<Key, Value, Hasher>::~HashTree() {
         free_root(rptr);
     }
     free_root(root_.load());
+}
+
+template <class Key, class Value, class Hasher>
+void HashTree<Key, Value, Hasher>::PrintCellCount() {
+    for (int i = 0; i < 64; ++i) {
+        std::cout << cell_count_[i] << ' ';
+    }
+    std::cout << '\n';
 }
