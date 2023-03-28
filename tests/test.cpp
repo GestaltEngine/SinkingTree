@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 using namespace sinking_tree;
+using namespace hazard;
 
 TEST_CASE("Basic") {
     {

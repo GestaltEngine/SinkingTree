@@ -28,6 +28,7 @@ inline uintptr_t filter_ptr(void *ptr) {
 }  // namespace
 
 using namespace hashers;
+using namespace hazard;
 
 // declarations
 
@@ -44,13 +45,14 @@ class SinkingTree {
     struct alignas(16) Cell {
         std::atomic<void *> lhs{};
         std::atomic<void *> rhs{};
-        // nullptr - std::pair<Key, Value>*, free
-        // 1 lowest bit is 0 and not nullptr - std::pair<Key, Value>*, taken
-        // 1 lowest bit is 1 - Cell*
+        // the lowest bit is 0 - KV*
+        // the lowest bit is 1 - Cell*
         ~Cell();
     };
 
-    // alignment property ensures last pointer bit for this type is always zero
+    // alignment property ensures last pointer bit for this type is always zero, 
+    // even if K or V is an dataless type
+    // making a set(V = void) with a single-bit key possible
     struct alignas(std::max(2UL, alignof(std::pair<Key, Value>))) KV {
         Key key;
         Value value;

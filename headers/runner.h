@@ -6,6 +6,8 @@
 #include <vector>
 #include <thread>
 
+using namespace hazard;
+
 class Runner {
 public:
     explicit Runner(uint64_t num_iterations) : num_iterations_{num_iterations} {
