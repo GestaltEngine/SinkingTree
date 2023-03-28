@@ -10,12 +10,14 @@
 
 static constexpr auto kSeed = 14753334;
 
+using namespace sinking_tree;
+
 TEST_CASE("Benchmark inserts") {
     const auto kNumThreads = GENERATE(2u, 4u, 8u);
     static constexpr auto kNumIterations = 100'000;
 
     BENCHMARK("RandomInsertions:" + std::to_string(kNumThreads)) {
-        HashTree<int, int> map(kNumIterations);
+        SinkingTree<int, int> map(kNumIterations);
         Runner runner{kNumIterations};
         for (auto i : std::views::iota(0u, kNumThreads)) {
             Random rand{kSeed + 10 * i};
@@ -39,7 +41,7 @@ TEST_CASE("Benchmark inserts from default size") {
     static constexpr auto kNumIterations = 100'000;
 
     BENCHMARK("RandomInsertions:" + std::to_string(kNumThreads)) {
-        HashTree<int, int> map;
+        SinkingTree<int, int> map;
         Runner runner{kNumIterations};
         for (auto i : std::views::iota(0u, kNumThreads)) {
             Random rand{kSeed + 10 * i};
@@ -63,7 +65,7 @@ TEST_CASE("Benchmark reads") {
     static constexpr auto kNumIterations = 100'000;
 
     BENCHMARK("RandomReads: " + std::to_string(kNumThreads) + ", " + std::to_string(kSize)) {
-        HashTree<int, int> map(kNumIterations);
+        SinkingTree<int, int> map(kNumIterations);
         RegisterThread();
 
         for (int i = 0; i < kSize; ++i) {

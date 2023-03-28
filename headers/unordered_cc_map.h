@@ -7,6 +7,8 @@
 #include <functional>
 #include <optional>
 
+namespace sinking_tree {
+
 namespace {
 constexpr HashType n_bit_mask(int n) {
     return (static_cast<HashType>(1) << n) - 1;
@@ -16,23 +18,24 @@ constexpr size_t power(int n) {
     return static_cast<size_t>(1) << n;
 }
 
-uintptr_t bits(void *ptr) {
+inline uintptr_t bits(void *ptr) {
     return reinterpret_cast<uintptr_t>(ptr);
 }
 
-uintptr_t filter_ptr(void *ptr) {
+inline uintptr_t filter_ptr(void *ptr) {
     return bits(ptr) & ~static_cast<uintptr_t>(1);
 }
 }  // namespace
 
 using namespace hashers;
+
 // declarations
 
 enum class AcceptorState { kEmpty, kKeyValue, kCell };
 enum class InjectorState { kEmpty, kKeyValue, kCell };
 
 template <class Key, class Value, class Hasher = DefaultHasher<Key>>
-class HashTree {
+class SinkingTree {
     struct Root {
         size_t bit_count;
         std::atomic<void *> ptrs[];
@@ -53,34 +56,52 @@ class HashTree {
         Value value;
     };
 
-    struct TreeTraverser {
-        HashType hash;
-        int depth = -1;
+    class TreeTraverser {
+    public:
+        TreeTraverser(const Key &key, Hasher hasher) : key_ref_(key), hasher_(hasher), hash_(hasher_(key, 0)){};
 
-        int advance(int bit_count = 1) {
-            int index = hash & n_bit_mask(bit_count);
-            hash = hash >> bit_count;
-            depth++;
+        int Advance(int bit_count = 1) {
+            while (bit_count > bits_alive_) {
+                bits_consumed_ += bits_alive_;
+                bit_count -= bits_alive_;
+                hash_ = hasher_(key_ref_, bits_consumed_ / (sizeof(HashType) * 8));
+                bits_alive_ = 8 * sizeof(HashType);
+            }
+            int index = hash_ & n_bit_mask(bit_count);
+            hash_ >>= bit_count;
+            bits_alive_ -= bit_count;
+            bits_consumed_ += bit_count;
             return index;
         }
+
+        int BitsConsumed() const {
+            return bits_consumed_;
+        }
+
+    private:
+        const Key &key_ref_;
+        Hasher hasher_;
+        HashType hash_;
+        int bits_consumed_{0};
+        uint8_t bits_alive_{8 * sizeof(HashType)};
     };
 
     static constexpr int kMaxSolidity_ = 8 * sizeof(HashType);
 
 public:
-    HashTree(size_t capacity = 2, Hasher hasher = Hasher());
-    ~HashTree();
+    SinkingTree(size_t capacity = 2, Hasher hasher = Hasher());
+    ~SinkingTree();
 
-    bool Put(const Key& key, const Value& value);
+    bool Put(const Key &key, const Value &value);
     std::optional<Value> Get(const Key &key);
     bool Erase(const Key &key);
 
     void MergeRoot(int);
 
-    HashTree(const HashTree &other) = delete;
-    HashTree operator=(const HashTree &other) = delete;
-    HashTree(HashTree &&other) = delete;
-    HashTree operator=(HashTree &&other) = delete;
+    SinkingTree(const SinkingTree &other) = delete;
+    SinkingTree operator=(const SinkingTree &other) = delete;
+    SinkingTree(SinkingTree &&other) = delete;
+    SinkingTree operator=(SinkingTree &&other) = delete;
 
 private:
     AcceptorState deliberate_state(void *);
@@ -95,8 +116,7 @@ private:
 // definitions
 
 template <class Key, class Value, class Hasher>
-HashTree<Key, Value, Hasher>::HashTree(size_t capacity, Hasher hasher)
-    : hasher_(hasher) {
+SinkingTree<Key, Value, Hasher>::SinkingTree(size_t capacity, Hasher hasher) : hasher_(hasher) {
     size_t bit_count = 1;
     size_t root_size = 2;
     while (root_size < capacity) {
@@ -113,10 +133,10 @@ HashTree<Key, Value, Hasher>::HashTree(size_t capacity, Hasher hasher)
 }
 
 template <class Key, class Value, class Hasher>
-bool HashTree<Key, Value, Hasher>::Put(const Key& key, const Value& value) {
-    TreeTraverser traverser{hasher_(key)};
+bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
+    TreeTraverser traverser(key, hasher_);
     Root *root = root_.load(std::memory_order_acquire);
-    std::atomic<void *> *ptr2atomic = &(root->ptrs[traverser.advance(root->bit_count)]);
+    std::atomic<void *> *ptr2atomic = &(root->ptrs[traverser.Advance(root->bit_count)]);
 
     void *desired = new KV{key, value};
     void *expected = ptr2atomic->load(std::memory_order_acquire);
@@ -143,7 +163,7 @@ bool HashTree<Key, Value, Hasher>::Put(const Key& key, const Value& value) {
                 if (bits(ptr) & 1) {
                     Release();
                     ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(
-                        filter_ptr(ptr))[traverser.advance()]);
+                        filter_ptr(ptr))[traverser.Advance()]);
                     expected = nullptr;
                 } else {
                     KV *acc_ptr = reinterpret_cast<KV *>(ptr);
@@ -155,17 +175,20 @@ bool HashTree<Key, Value, Hasher>::Put(const Key& key, const Value& value) {
                     }
                     // no Release() intended
                     Cell *new_cell = new Cell;
-                    migration_index =
-                        (hasher_(acc_ptr->key) >> (traverser.depth + root->bit_count)) & 1;
+                    
+                    TreeTraverser repath(acc_ptr->key, hasher_);
+                    repath.Advance(traverser.BitsConsumed());
+                    reinterpret_cast<std::atomic<void *> *>(new_cell)[repath.Advance()].store(
+                        ptr, std::memory_order_relaxed);
+
                     second_extra = desired;
-                    reinterpret_cast<std::atomic<void *> *>(new_cell)[migration_index].store(
-                        ptr, std::memory_order_release);
                     desired = reinterpret_cast<void *>(bits(new_cell) | 1);
                     expected = ptr;
                     inj = InjectorState::kCell;
                 }
             } else if (acc == AcceptorState::kCell) {
-                ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(expected))[traverser.advance()]);
+                ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(
+                    filter_ptr(expected))[traverser.Advance()]);
                 expected = nullptr;
             } else {
                 // inaction intended
@@ -176,15 +199,16 @@ bool HashTree<Key, Value, Hasher>::Put(const Key& key, const Value& value) {
             break;
         } else {
             Release();
-            int solidity = root->bit_count + traverser.depth;
+            int solidity = traverser.BitsConsumed();
             if (solidity <= kMaxSolidity_) {
                 auto before = cell_count_[solidity - 1].fetch_add(1);
-                if (solidity > 1 && before + 1 == power(solidity) && traverser.depth > 1) {
+                if (solidity > 1 && before + 1 == power(solidity) &&
+                    traverser.BitsConsumed() - root->bit_count > 1) {
                     MergeRoot(solidity);
                 }
             }
-            ptr2atomic =
-                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(desired))[traverser.advance()]);
+            ptr2atomic = &(
+                reinterpret_cast<std::atomic<void *> *>(filter_ptr(desired))[traverser.Advance()]);
             expected = nullptr;
             desired = second_extra;
             second_extra = nullptr;
@@ -201,10 +225,10 @@ bool HashTree<Key, Value, Hasher>::Put(const Key& key, const Value& value) {
 }
 
 template <class Key, class Value, class Hasher>
-std::optional<Value> HashTree<Key, Value, Hasher>::Get(const Key &key) {
+std::optional<Value> SinkingTree<Key, Value, Hasher>::Get(const Key &key) {
     Root *root = root_.load(std::memory_order_acquire);
-    TreeTraverser traverser{hasher_(key)};
-    std::atomic<void *> *ptr2atomic = &(root->ptrs[traverser.advance(root->bit_count)]);
+    TreeTraverser traverser(key, hasher_);
+    std::atomic<void *> *ptr2atomic = &(root->ptrs[traverser.Advance(root->bit_count)]);
     void *ptr = ptr2atomic->load(std::memory_order_acquire);
 
     while (true) {
@@ -213,7 +237,7 @@ std::optional<Value> HashTree<Key, Value, Hasher>::Get(const Key &key) {
         }
         if (bits(ptr) & 1) {
             ptr2atomic =
-                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.advance()]);
+                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.Advance()]);
             ptr = ptr2atomic->load(std::memory_order_acquire);
             continue;
         }
@@ -224,7 +248,7 @@ std::optional<Value> HashTree<Key, Value, Hasher>::Get(const Key &key) {
         } else if (bits(ptr) & 1) {
             Release();
             ptr2atomic =
-                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.advance()]);
+                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.Advance()]);
             ptr = ptr2atomic->load(std::memory_order_acquire);
             continue;
         }
@@ -239,8 +263,7 @@ std::optional<Value> HashTree<Key, Value, Hasher>::Get(const Key &key) {
 }
 
 template <class Key, class Value, class Hasher>
-AcceptorState HashTree<Key, Value, Hasher>::deliberate_state(
-    void *expected) {
+AcceptorState SinkingTree<Key, Value, Hasher>::deliberate_state(void *expected) {
     if (expected == nullptr) {
         return AcceptorState::kEmpty;
     } else if (bits(expected) & 1) {
@@ -251,10 +274,10 @@ AcceptorState HashTree<Key, Value, Hasher>::deliberate_state(
 }
 
 template <class Key, class Value, class Hasher>
-bool HashTree<Key, Value, Hasher>::Erase(const Key &key) {
-    TreeTraverser traverser{hasher_(key)};
+bool SinkingTree<Key, Value, Hasher>::Erase(const Key &key) {
+    TreeTraverser traverser(key, hasher_);
     Root *root = root_.load(std::memory_order_acquire);
-    std::atomic<void *> *ptr2atomic = &(root->ptrs[traverser.advance(root->bit_count)]);
+    std::atomic<void *> *ptr2atomic = &(root->ptrs[traverser.Advance(root->bit_count)]);
     void *ptr = ptr2atomic->load(std::memory_order_acquire);
 
     while (true) {
@@ -263,7 +286,7 @@ bool HashTree<Key, Value, Hasher>::Erase(const Key &key) {
         }
         if (bits(ptr) & 1) {
             ptr2atomic =
-                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.advance()]);
+                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.Advance()]);
             ptr = ptr2atomic->load(std::memory_order_acquire);
             continue;
         }
@@ -271,7 +294,7 @@ bool HashTree<Key, Value, Hasher>::Erase(const Key &key) {
         if (bits(ptr) & 1) {
             Release();
             ptr2atomic =
-                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.advance()]);
+                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.Advance()]);
             ptr = ptr2atomic->load(std::memory_order_acquire);
             continue;
         } else if (ptr == nullptr) {
@@ -286,8 +309,8 @@ bool HashTree<Key, Value, Hasher>::Erase(const Key &key) {
             bool cas_success =
                 ptr2atomic->compare_exchange_strong(ptr, nullptr, std::memory_order_acq_rel);
             if (cas_success) {
-                Retire(kv);
                 Release();
+                Retire(kv);
                 return true;
             }
             Release();
@@ -296,7 +319,7 @@ bool HashTree<Key, Value, Hasher>::Erase(const Key &key) {
 }
 
 template <class Key, class Value, class Hasher>
-HashTree<Key, Value, Hasher>::Cell::~Cell() {
+SinkingTree<Key, Value, Hasher>::Cell::~Cell() {
     if (bits(lhs) & 1) {
         delete reinterpret_cast<Cell *>(filter_ptr(lhs));
     } else if (lhs != nullptr) {
@@ -310,10 +333,10 @@ HashTree<Key, Value, Hasher>::Cell::~Cell() {
 }
 
 template <class Key, class Value, class Hasher>
-void HashTree<Key, Value, Hasher>::free_root(Root *ptr) {
+void SinkingTree<Key, Value, Hasher>::free_root(Root *ptr) {
     for (size_t i = 0; i < power(ptr->bit_count); ++i) {
         if (bits(ptr->ptrs[i]) & 1) {
-            HashTree<Key, Value, Hasher>::Cell *cptr =
+            SinkingTree<Key, Value, Hasher>::Cell *cptr =
                 reinterpret_cast<Cell *>(filter_ptr(ptr->ptrs[i]));
             delete cptr;
         } else if (ptr->ptrs[i] != nullptr) {
@@ -325,13 +348,13 @@ void HashTree<Key, Value, Hasher>::free_root(Root *ptr) {
 }
 
 template <class Key, class Value, class Hasher>
-HashTree<Key, Value, Hasher>::~HashTree() {
+SinkingTree<Key, Value, Hasher>::~SinkingTree() {
     for (Root *rptr : old_roots_) {
         if (rptr == nullptr) {
             continue;
         }
         for (size_t j = 0; j < power(rptr->bit_count); ++j) {
-            Cell* cptr = reinterpret_cast<Cell*>(filter_ptr(rptr->ptrs[j]));
+            Cell *cptr = reinterpret_cast<Cell *>(filter_ptr(rptr->ptrs[j]));
             cptr->lhs = nullptr;
             cptr->rhs = nullptr;
         }
@@ -340,10 +363,9 @@ HashTree<Key, Value, Hasher>::~HashTree() {
     free_root(root_.load());
 }
 
-
 template <class Key, class Value, class Hasher>
-void HashTree<Key, Value, Hasher>::MergeRoot(int solidity) {
-    Root* root;
+void SinkingTree<Key, Value, Hasher>::MergeRoot(int solidity) {
+    Root *root;
     do {
         root = root_.load(std::memory_order_acquire);
     } while (root->bit_count != solidity - 2);
@@ -354,14 +376,15 @@ void HashTree<Key, Value, Hasher>::MergeRoot(int solidity) {
     new_root->bit_count = 1 + root->bit_count;
 
     for (size_t i = 0; i < rs; ++i) {
-        Cell* cptr = reinterpret_cast<Cell *>(filter_ptr(root->ptrs[i]));
-        void* lhs = cptr->lhs.load();
+        Cell *cptr = reinterpret_cast<Cell *>(filter_ptr(root->ptrs[i]));
+        void *lhs = cptr->lhs.load();
         assert(bits(lhs) & 1);
         new_root->ptrs[i] = lhs;
-        void* rhs = cptr->rhs.load();
+        void *rhs = cptr->rhs.load();
         assert(bits(rhs) & 1);
         new_root->ptrs[i + rs] = rhs;
     }
     root_.store(new_root, std::memory_order_release);
     old_roots_[solidity - 2] = root;
 }
+}  // namespace sinking_tree

@@ -6,8 +6,10 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <ranges>
 
+using namespace sinking_tree;
+
 TEST_CASE("Multistress") {
-    HashTree<int, int> my(16);
+    SinkingTree<int, int> my(16);
     const auto kNumThreads = GENERATE(2u, 4u, 8u);
 
     const int kNumIterations = 1'000'000;

@@ -8,10 +8,12 @@
 #include <string>
 #include <unordered_map>
 
+using namespace sinking_tree;
+
 TEST_CASE("Basic") {
     {
         RegisterThread();
-        HashTree<int, int> map(16);
+        SinkingTree<int, int> map(16);
         REQUIRE(map.Put(1, 1));
         REQUIRE(map.Put(2, 2));
         REQUIRE(map.Put(3, 3));
@@ -30,7 +32,7 @@ TEST_CASE("Basic") {
 
 TEST_CASE("Mix") {
     RegisterThread();
-    HashTree<int, int> my(16);
+    SinkingTree<int, int> my(16);
     std::unordered_map<int, int> baseline;
     std::mt19937 gen(0);
     std::uniform_int_distribution<int> dist;
@@ -56,7 +58,7 @@ TEST_CASE("Mix") {
 
 TEST_CASE("A lot of inserts") {
     RegisterThread();
-    HashTree<int, int> my;
+    SinkingTree<int, int> my;
     std::vector<int> x;
     std::mt19937 gen(0);
     for (int i = 0; i < 100'000; ++i) {
