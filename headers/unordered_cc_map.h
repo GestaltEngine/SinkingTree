@@ -50,7 +50,7 @@ class SinkingTree {
         ~Cell();
     };
 
-    // alignment property ensures last pointer bit for this type is always zero, 
+    // alignment property ensures last pointer bit for this type is always zero,
     // even if K or V is an dataless type
     // making a set(V = void) with a single-bit key possible
     struct alignas(std::max(2UL, alignof(std::pair<Key, Value>))) KV {
@@ -60,7 +60,8 @@ class SinkingTree {
 
     class TreeTraverser {
     public:
-        TreeTraverser(const Key &key, Hasher hasher) : key_ref_(key), hasher_(hasher), hash_(hasher_(key, 0)){};
+        TreeTraverser(const Key &key, Hasher hasher)
+            : key_ref_(key), hasher_(hasher), hash_(hasher_(key, 0)){};
 
         int Advance(int bit_count = 1) {
             while (bit_count > bits_alive_) {
@@ -154,7 +155,7 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
                 Release();
                 Cell *discard = reinterpret_cast<Cell *>(filter_ptr(desired));
                 reinterpret_cast<std::atomic<void *> *>(discard)[migration_index].store(
-                    nullptr, std::memory_order_release);
+                    nullptr, std::memory_order_relaxed);
                 delete discard;
                 desired = second_extra;
                 second_extra = nullptr;
@@ -177,10 +178,10 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
                     }
                     // no Release() intended
                     Cell *new_cell = new Cell;
-                    
                     TreeTraverser repath(acc_ptr->key, hasher_);
                     repath.Advance(traverser.BitsConsumed());
-                    reinterpret_cast<std::atomic<void *> *>(new_cell)[repath.Advance()].store(
+                    migration_index = repath.Advance();
+                    reinterpret_cast<std::atomic<void *> *>(new_cell)[migration_index].store(
                         ptr, std::memory_order_relaxed);
 
                     second_extra = desired;

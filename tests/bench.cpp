@@ -13,7 +13,7 @@ static constexpr auto kSeed = 14753334;
 using namespace sinking_tree;
 
 TEST_CASE("Benchmark inserts") {
-    const auto kNumThreads = GENERATE(2u, 4u, 8u);
+    const auto kNumThreads = GENERATE(1u, 2u, 4u, 8u);
     static constexpr auto kNumIterations = 100'000;
 
     BENCHMARK("RandomInsertions:" + std::to_string(kNumThreads)) {
@@ -37,7 +37,7 @@ TEST_CASE("Benchmark inserts") {
 
 
 TEST_CASE("Benchmark inserts from default size") {
-    const auto kNumThreads = GENERATE(2u, 4u, 8u);
+    const auto kNumThreads = GENERATE(1u, 2u, 4u, 8u);
     static constexpr auto kNumIterations = 100'000;
 
     BENCHMARK("RandomInsertions:" + std::to_string(kNumThreads)) {
@@ -60,7 +60,7 @@ TEST_CASE("Benchmark inserts from default size") {
 }
 
 TEST_CASE("Benchmark reads") {
-    const auto kNumThreads = GENERATE(2u, 4u, 8u);
+    const auto kNumThreads = GENERATE(1u, 2u, 4u, 8u);
     const auto kSize = 1'000;
     static constexpr auto kNumIterations = 100'000;
 
