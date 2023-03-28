@@ -5,7 +5,9 @@
 template <class Key, class Value>
 class Baseline {
 public:
-    Baseline(size_t capacity) : map_(capacity) {
+    Baseline() = default;
+
+    explicit Baseline(size_t capacity) : map_(capacity) {
     }
 
     bool Put(Key key, Value value) {
@@ -24,10 +26,6 @@ public:
     bool Erase(const Key& key) {
         std::lock_guard lock(mutex_);
         return 1 == map_.erase(key);
-    }
-    size_t Cap() const {
-        std::lock_guard lock(mutex_);
-        return map_.bucket_count();
     }
 
 private:

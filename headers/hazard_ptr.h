@@ -18,29 +18,36 @@ struct RetiredPtr {
     void* value;
     std::function<void()> deleter;
     RetiredPtr* next;
-};  // mb deque would be bettererester?
+};
 
 
 thread_local std::atomic<void*> hazard_ptr{nullptr};  // currently captured pointer
 thread_local ThreadState* registry = nullptr;
 
-std::mutex threads_lock;
-std::unordered_set<ThreadState*> threads;  // pointers to pointers to protected atomic pointers
+struct HazardPtrGlobalState {
+    std::mutex threads_lock;
+    std::unordered_set<ThreadState*> threads;  // pointers to pointers to protected atomic pointers
 
-std::mutex scan_lock; 
-std::atomic<RetiredPtr*> free_list = nullptr;
-std::atomic<int> free_list_size_approx = 0;
-const int kMaxFreeListLength = 100;
+    std::mutex scan_lock; 
+    std::atomic<RetiredPtr*> free_list = nullptr;
+    std::atomic<int> free_list_size_approx = 0;
+    static const int kMaxFreeListLength = 100;
+    
+    ~HazardPtrGlobalState() {
+        RetiredPtr* retired = free_list.load();
+        while(retired != nullptr) {
+            retired->deleter();
+            auto* tmp = retired;
+            retired = retired->next;
+            delete tmp;
+        }
+    }
+};
+
+HazardPtrGlobalState global;
 
 }  // namespace
 
-// Acquire атомарно читает значение *ptr и добавляет это значение
-// в множество защищённых указателей.
-//
-// Один поток в один момент времени может держать только один указатель в множестве защищённых.
-//
-// Объект, на который ссылается std::atomic<T*> должен быть удалён с использованием Retire. Нельзя
-// удалять этот объект напрямую через delete.
 template <class T>
 T* Acquire(std::atomic<T*>* ptr) {
     assert(registry != nullptr);
@@ -57,26 +64,26 @@ T* Acquire(std::atomic<T*>* ptr) {
     } while (true);
 }
 
-// Release удаляет текущий активный указатель из множества защищённых.
 inline void Release() {
     assert(registry != nullptr);
     hazard_ptr.store(nullptr);
 }
 
 void ScanFreeList() {
-    free_list_size_approx.store(0);
-    if (!scan_lock.try_lock()) {
+    int fls = global.free_list_size_approx.exchange(0);
+    if (!global.scan_lock.try_lock()) {
         return;
     }
-    if (free_list_size_approx.load() <= kMaxFreeListLength) {
-        scan_lock.unlock();
+    if (fls <= global.kMaxFreeListLength) {
+        global.scan_lock.unlock();
+        global.free_list_size_approx.fetch_add(fls);
         return;
     }
-    auto retired = free_list.exchange(nullptr);
+    auto retired = global.free_list.exchange(nullptr);
     std::unordered_set<void*> hazard;
     {
-        std::unique_lock guard(threads_lock);
-        for (const auto& thread : threads) {
+        std::lock_guard guard(global.threads_lock);
+        for (const auto& thread : global.threads) {
             if (auto ptr = thread->ptr->load(); ptr) {
                 hazard.insert(ptr);
             }
@@ -86,66 +93,57 @@ void ScanFreeList() {
     while (retired != nullptr) {
         auto next = retired->next;
         if (hazard.count(retired->value) > 0) {
-            auto old_free_list = free_list.load();
-            while (!free_list.compare_exchange_weak(old_free_list, retired)) {
+            auto old_free_list = global.free_list.load();
+            retired->next = old_free_list;
+            while (!global.free_list.compare_exchange_weak(old_free_list, retired)) {
                 retired->next = old_free_list;
             }
-            free_list_size_approx++;
+            global.free_list_size_approx.fetch_add(1);
         } else {
             retired->deleter();
             delete retired;
         }
         retired = next;
     }
-    scan_lock.unlock();
+    global.scan_lock.unlock();
 }
 
-// Retire отправляет объект в очередь на удаление.
-//
-// Объект будет удалён в произвольный момент времени в будущем. Гарантируется, что удаление не
-// произойдёт, пока объект находится в множестве защищённых.
-//
-// Пользователь должен гарантировать, никакой другой поток уже не имеет доступа к
-// *value через атомарные переменные.
 template <class T, class Deleter = std::default_delete<T>>
 void Retire(T* value, Deleter deleter = {}) {
     assert(registry != nullptr);
-    auto old_free_list = free_list.load();
+    auto old_free_list = global.free_list.load();
     auto rptr = new RetiredPtr;
     rptr->value = value;
-    rptr->deleter = [value, deleter]() { deleter(value); };  // type erasure, sorta
+    rptr->deleter = [value, deleter]() { deleter(value); };
     rptr->next = old_free_list;
 
-    while (!free_list.compare_exchange_weak(old_free_list, rptr)) {
+    while (!global.free_list.compare_exchange_weak(old_free_list, rptr)) {
         rptr->next = old_free_list;
     }
-    free_list_size_approx++;
+    global.free_list_size_approx++;
 
-    int size = free_list_size_approx.load();
-    if (size > kMaxFreeListLength) {
+    int size = global.free_list_size_approx.load();
+    if (size > global.kMaxFreeListLength) {
         ScanFreeList();
     }
 }
 
-// Каждый поток обязан позвать RegisterThread перед работой с Hazard Ptr.
 inline void RegisterThread() {
-    std::lock_guard<std::mutex> guard(threads_lock);
+    std::lock_guard<std::mutex> guard(global.threads_lock);
     if (registry != nullptr) {
         throw std::runtime_error("RegisterThread called before UnregisterThread");
     }
     registry = new (ThreadState);
     registry->ptr = &hazard_ptr;
-    threads.insert(registry);
+    global.threads.insert(registry);
 }
 
-// UnregisterThread вызывается каждым потоком перед завершением. Работать с Hazard Ptr после вызова
-// UnregisterThread нельзя.
 inline void UnregisterThread() {
-    std::lock_guard<std::mutex> guard(threads_lock);
+    std::lock_guard<std::mutex> guard(global.threads_lock);
     if (registry == nullptr) {
         throw std::runtime_error("UnregisterThread called before RegisterThread");
     }
-    threads.erase(registry);
+    global.threads.erase(registry);
     delete registry;
     registry = nullptr;
 }

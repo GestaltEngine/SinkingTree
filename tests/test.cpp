@@ -66,7 +66,6 @@ TEST_CASE("A lot of inserts") {
     for (int i = 0; i < 100'000; ++i) {
         REQUIRE(my.Put(x[i], i));
     }
-    my.PrintCellCount();
     for (int i = 0; i < 100'000; ++i) {
         REQUIRE(my.Erase(x[i]));
     }

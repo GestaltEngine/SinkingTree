@@ -33,9 +33,33 @@ TEST_CASE("Benchmark inserts") {
     };
 }
 
+
+TEST_CASE("Benchmark inserts from default size") {
+    const auto kNumThreads = GENERATE(2u, 4u, 8u);
+    static constexpr auto kNumIterations = 100'000;
+
+    BENCHMARK("RandomInsertions:" + std::to_string(kNumThreads)) {
+        HashTree<int, int> map;
+        Runner runner{kNumIterations};
+        for (auto i : std::views::iota(0u, kNumThreads)) {
+            Random rand{kSeed + 10 * i};
+            runner.Do([&map, rand]() mutable { map.Put(rand(), 1); });
+        }
+    };
+
+    BENCHMARK("RandomInsertions(std):" + std::to_string(kNumThreads)) {
+        Baseline<int, int> map;
+        Runner runner{kNumIterations};
+        for (auto i : std::views::iota(0u, kNumThreads)) {
+            Random rand{kSeed + 10 * i};
+            runner.Do([&map, rand]() mutable { map.Put(rand(), 1); });
+        }
+    };
+}
+
 TEST_CASE("Benchmark reads") {
     const auto kNumThreads = GENERATE(2u, 4u, 8u);
-    const auto kSize = GENERATE(100, 1'000, 10'000);
+    const auto kSize = 1'000;
     static constexpr auto kNumIterations = 100'000;
 
     BENCHMARK("RandomReads: " + std::to_string(kNumThreads) + ", " + std::to_string(kSize)) {
