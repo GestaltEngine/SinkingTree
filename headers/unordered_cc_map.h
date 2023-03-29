@@ -99,7 +99,7 @@ public:
     std::optional<Value> Get(const Key &key);
     bool Erase(const Key &key);
 
-    void MergeRoot(int);
+    void Sink(int);
 
     SinkingTree(const SinkingTree &other) = delete;
     SinkingTree operator=(const SinkingTree &other) = delete;
@@ -207,7 +207,7 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
                 auto before = cell_count_[solidity - 1].fetch_add(1);
                 if (solidity > 1 && before + 1 == power(solidity) &&
                     traverser.BitsConsumed() - root->bit_count > 1) {
-                    MergeRoot(solidity);
+                    Sink(solidity);
                 }
             }
             ptr2atomic = &(
@@ -367,7 +367,7 @@ SinkingTree<Key, Value, Hasher>::~SinkingTree() {
 }
 
 template <class Key, class Value, class Hasher>
-void SinkingTree<Key, Value, Hasher>::MergeRoot(int solidity) {
+void SinkingTree<Key, Value, Hasher>::Sink(int solidity) {
     Root *root;
     do {
         root = root_.load(std::memory_order_acquire);
