@@ -99,7 +99,6 @@ public:
     std::optional<Value> Get(const Key &key);
     bool Erase(const Key &key);
 
-    void Sink(int);
 
     SinkingTree(const SinkingTree &other) = delete;
     SinkingTree operator=(const SinkingTree &other) = delete;
@@ -107,11 +106,12 @@ public:
     SinkingTree operator=(SinkingTree &&other) = delete;
 
 private:
-    AcceptorState deliberate_state(void *);
-    void free_root(Root *);
+    void Sink(int);
+    AcceptorState DeliberateState(void *);
+    void FreeRoot(Root *);
+
     std::atomic<Root *> root_;
     Hasher hasher_;
-
     std::array<Root *, kMaxSolidity_> old_roots_{};
     std::atomic<size_t> cell_count_[kMaxSolidity_]{};
 };
@@ -150,7 +150,8 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
     InjectorState inj = InjectorState::kKeyValue;
     while (true) {
         do {
-            auto acc = deliberate_state(expected);
+            deliberate:
+            auto acc = DeliberateState(expected);
             if (inj == InjectorState::kCell) {
                 Release();
                 Cell *discard = reinterpret_cast<Cell *>(filter_ptr(desired));
@@ -167,7 +168,8 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
                     Release();
                     ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(
                         filter_ptr(ptr))[traverser.Advance()]);
-                    expected = nullptr;
+                    expected = ptr2atomic->load(std::memory_order_acquire);
+                    goto deliberate;
                 } else {
                     KV *acc_ptr = reinterpret_cast<KV *>(ptr);
                     KV *inj_ptr = reinterpret_cast<KV *>(desired);
@@ -192,7 +194,8 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
             } else if (acc == AcceptorState::kCell) {
                 ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(
                     filter_ptr(expected))[traverser.Advance()]);
-                expected = nullptr;
+                expected = ptr2atomic->load(std::memory_order_acquire);
+                goto deliberate;
             } else {
                 // inaction intended
             }
@@ -266,7 +269,7 @@ std::optional<Value> SinkingTree<Key, Value, Hasher>::Get(const Key &key) {
 }
 
 template <class Key, class Value, class Hasher>
-AcceptorState SinkingTree<Key, Value, Hasher>::deliberate_state(void *expected) {
+AcceptorState SinkingTree<Key, Value, Hasher>::DeliberateState(void *expected) {
     if (expected == nullptr) {
         return AcceptorState::kEmpty;
     } else if (bits(expected) & 1) {
@@ -336,7 +339,7 @@ SinkingTree<Key, Value, Hasher>::Cell::~Cell() {
 }
 
 template <class Key, class Value, class Hasher>
-void SinkingTree<Key, Value, Hasher>::free_root(Root *ptr) {
+void SinkingTree<Key, Value, Hasher>::FreeRoot(Root *ptr) {
     for (size_t i = 0; i < power(ptr->bit_count); ++i) {
         if (bits(ptr->ptrs[i]) & 1) {
             SinkingTree<Key, Value, Hasher>::Cell *cptr =
@@ -361,9 +364,9 @@ SinkingTree<Key, Value, Hasher>::~SinkingTree() {
             cptr->lhs = nullptr;
             cptr->rhs = nullptr;
         }
-        free_root(rptr);
+        FreeRoot(rptr);
     }
-    free_root(root_.load());
+    FreeRoot(root_.load());
 }
 
 template <class Key, class Value, class Hasher>

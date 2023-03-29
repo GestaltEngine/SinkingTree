@@ -14,7 +14,6 @@ Almost* lock-free implementation of hash-map, free of limitations other lock-fre
 
 ## Limitations
 
-- Single-threaded insertion time is worse than std::unordered_map 
 - As the actual size of the map grows beyond the expected capacity, insertion, lookup and erase time complexity degrades to `O(log log n)`
 - Currently, there are opportunities for the map to be less memory-hungry if lock-free atomic shared pointers are implemented, albeit it's still ok without them
 - Relies on hazard pointers for safe key deletion - latency is bad in the worst case
