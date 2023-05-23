@@ -9,30 +9,24 @@
 #include <unordered_map>
 
 using namespace sinking_tree;
-using namespace hazard;
 
 TEST_CASE("Basic") {
-    {
-        RegisterThread();
-        SinkingTree<int, int> map(16);
-        REQUIRE(map.Put(1, 1));
-        REQUIRE(map.Put(2, 2));
-        REQUIRE(map.Put(3, 3));
-        REQUIRE(!map.Put(1, 0));
-        REQUIRE(!map.Put(2, 0));
-        REQUIRE(!map.Put(3, 0));
-        REQUIRE(map.Get(3).has_value());
-        REQUIRE(map.Get(2).has_value());
-        REQUIRE(map.Get(1).has_value());
-        REQUIRE(map.Erase(3));
-        REQUIRE(map.Erase(2));
-        REQUIRE(map.Erase(1));
-        UnregisterThread();
-    }
+    SinkingTree<int, int> map(16);
+    REQUIRE(map.Put(1, 1));
+    REQUIRE(map.Put(2, 2));
+    REQUIRE(map.Put(3, 3));
+    REQUIRE(!map.Put(1, 0));
+    REQUIRE(!map.Put(2, 0));
+    REQUIRE(!map.Put(3, 0));
+    REQUIRE(map.Get(3).has_value());
+    REQUIRE(map.Get(2).has_value());
+    REQUIRE(map.Get(1).has_value());
+    REQUIRE(map.Erase(3));
+    REQUIRE(map.Erase(2));
+    REQUIRE(map.Erase(1));
 }
 
 TEST_CASE("Mix") {
-    RegisterThread();
     SinkingTree<int, int> my(16);
     std::unordered_map<int, int> baseline;
     std::mt19937 gen(0);
@@ -54,11 +48,9 @@ TEST_CASE("Mix") {
             REQUIRE(res.has_value() == (base != baseline.end()));
         }
     }
-    UnregisterThread();
 }
 
 TEST_CASE("A lot of inserts") {
-    RegisterThread();
     SinkingTree<int, int> my;
     std::vector<int> x;
     std::mt19937 gen(0);
@@ -72,5 +64,4 @@ TEST_CASE("A lot of inserts") {
     for (int i = 0; i < 100'000; ++i) {
         REQUIRE(my.Erase(x[i]));
     }
-    UnregisterThread();
 }

@@ -1,151 +1,144 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
-#include <cassert>
-#include <memory>
-#include <functional>
-#include <mutex>
-#include <unordered_set>
-#include <iostream>
+#include <array>
+#include <vector>
 
-namespace {
+template <typename T, size_t ProtectedPointersPerThread = 1, size_t MaxThreadCount = 64,
+          size_t BatchCap = 2 * MaxThreadCount* ProtectedPointersPerThread>
+class Hazard {
+    static_assert(BatchCap > ProtectedPointersPerThread * MaxThreadCount,
+                  "there must be more retireable pointers than there are protected ones to ensure "
+                  "Lock-Freedom");
 
-struct ThreadState {
-    std::atomic<void*>* ptr;
-};
+    struct ThreadState {
+        std::array<std::atomic<T*>, ProtectedPointersPerThread> protected_pointers;
+        std::array<T*, BatchCap> retired_pointers;
+        size_t retired_count{0};
+    };
 
-struct RetiredPtr {
-    void* value;
-    std::function<void()> deleter;
-    RetiredPtr* next;
-};
+    static inline thread_local ThreadState* registry = nullptr;
 
-thread_local std::atomic<void*> hazard_ptr{nullptr};  // currently captured pointer
-thread_local ThreadState* registry = nullptr;
+public:
+    class Mutator;
 
-struct HazardPtrGlobalState {
-    std::mutex threads_lock;
-    std::unordered_set<ThreadState*> threads;  // pointers to pointers to protected atomic pointers
-
-    std::mutex scan_lock;
-    std::atomic<RetiredPtr*> free_list = nullptr;
-    std::atomic<int> free_list_size_approx = 0;
-    static const int kMaxFreeListLength = 100;
-
-    ~HazardPtrGlobalState() {
-        RetiredPtr* retired = free_list.load();
-        while (retired != nullptr) {
-            retired->deleter();
-            auto* tmp = retired;
-            retired = retired->next;
-            delete tmp;
+    class Manager {
+    public:
+        Mutator MakeMutator() {
+            if (registry == nullptr) {
+                size_t thread_id = thread_counter_.fetch_add(1, std::memory_order_relaxed);
+                if (thread_id >= MaxThreadCount) {
+                    thread_counter_.fetch_sub(1, std::memory_order_relaxed);
+                    throw std::runtime_error("Max thread count overflow " +
+                                             std::to_string(thread_id));
+                }
+                registry = new ThreadState;
+                thread_pointers_[thread_id].store(registry, std::memory_order_relaxed);
+            }
+            return Mutator(this, registry);
         }
-    }
-};
 
-HazardPtrGlobalState global;
+        void Scan(ThreadState* retiring) {
+            std::vector<void*> all_protected;
 
-void ScanFreeList() {
-    int fls = global.free_list_size_approx.exchange(0);
-    if (!global.scan_lock.try_lock()) {
-        return;
-    }
-    if (fls <= global.kMaxFreeListLength) {
-        global.scan_lock.unlock();
-        global.free_list_size_approx.fetch_add(fls);
-        return;
-    }
-    auto retired = global.free_list.exchange(nullptr);
-    std::unordered_set<void*> hazard;
-    {
-        std::lock_guard guard(global.threads_lock);
-        for (const auto& thread : global.threads) {
-            if (auto ptr = thread->ptr->load(); ptr) {
-                hazard.insert(ptr);
+            size_t threads = thread_counter_.load(std::memory_order_relaxed);
+            for (size_t i = 0; i < threads; ++i) {
+                auto* ts = thread_pointers_[i].load(std::memory_order_relaxed);
+                if (ts == nullptr) {
+                    continue;
+                }
+                for (auto& atom_pointer : ts->protected_pointers) {
+                    void* ptr = atom_pointer.load(std::memory_order_acquire);
+                    if (ptr == nullptr) {
+                        continue;
+                    }
+                    all_protected.push_back(ptr);
+                }
+            }
+
+            std::sort(all_protected.begin(), all_protected.end());
+
+            std::vector<T*> approved;
+            std::vector<T*> dismissed;
+
+            for (T* rptr : retiring->retired_pointers) {
+                if (std::binary_search(all_protected.begin(), all_protected.end(), rptr)) {
+                    dismissed.push_back(rptr);
+                } else {
+                    approved.push_back(rptr);
+                }
+            }
+
+            for (T* rptr : approved) {
+                delete rptr;
+            }
+
+            retiring->retired_count = 0;
+            for (T* rptr : dismissed) {
+                retiring->retired_pointers[retiring->retired_count++] = rptr;
             }
         }
-    }
 
-    while (retired != nullptr) {
-        auto next = retired->next;
-        if (hazard.count(retired->value) > 0) {
-            auto old_free_list = global.free_list.load();
-            retired->next = old_free_list;
-            while (!global.free_list.compare_exchange_weak(old_free_list, retired)) {
-                retired->next = old_free_list;
+        void Cleanup () {
+            size_t threads = thread_counter_.load(std::memory_order_relaxed);
+            for (size_t i = 0; i < threads; ++i) {
+                ThreadState* ts = thread_pointers_[i].load(std::memory_order_relaxed);
+                for (size_t j = 0; j < ts->retired_count; ++j) {
+                    delete ts->retired_pointers[j];
+                    ts->retired_pointers[j] = nullptr;
+                }
+                delete ts;
             }
-            global.free_list_size_approx.fetch_add(1);
-        } else {
-            retired->deleter();
-            delete retired;
-        }
-        retired = next;
-    }
-    global.scan_lock.unlock();
-}
-
-}  // namespace
-
-namespace hazard {
-
-template <class T>
-T* Acquire(std::atomic<T*>* ptr) {
-    assert(registry != nullptr);
-    auto value = ptr->load();
-    do {
-        hazard_ptr.store(value);
-
-        auto new_value = ptr->load();
-        if (new_value == value) {
-            return value;
+            thread_counter_.store(0, std::memory_order_relaxed);
+            registry = nullptr;
         }
 
-        value = new_value;
-    } while (true);
-}
+        ~Manager() {
+            Cleanup();
+        }
 
-inline void Release() {
-    assert(registry != nullptr);
-    hazard_ptr.store(nullptr);
-}
+    private:
+        std::array<std::atomic<ThreadState*>, MaxThreadCount> thread_pointers_{};
+        std::atomic<size_t> thread_counter_{0};
+    };
 
-template <class T, class Deleter = std::default_delete<T>>
-void Retire(T* value, Deleter deleter = {}) {
-    assert(registry != nullptr);
-    auto old_free_list = global.free_list.load();
-    auto rptr = new RetiredPtr;
-    rptr->value = value;
-    rptr->deleter = [value, deleter]() { deleter(value); };
-    rptr->next = old_free_list;
+    class Mutator {
+        // V might be a child to T or void
+        template <typename V>
+        using AtomicPtr = std::atomic<V*>;
 
-    while (!global.free_list.compare_exchange_weak(old_free_list, rptr)) {
-        rptr->next = old_free_list;
-    }
+    public:
+        explicit Mutator(Manager* manager, ThreadState* tstate) : manager_(manager), tstate_(tstate) {
+        }
 
-    int size = global.free_list_size_approx.fetch_add(1);
-    if (size > global.kMaxFreeListLength) {
-        ScanFreeList();
-    }
-}
+        template <typename V>
+        T* Protect(size_t index, AtomicPtr<V>& ptr) {
+            if (index >= ProtectedPointersPerThread) {
+                throw std::runtime_error("bad index");
+            }
+            T* before;
+            T* after = reinterpret_cast<T*>(ptr.load(std::memory_order_relaxed));
+            do {
+                before = after;
+                tstate_->protected_pointers[index].store(before, std::memory_order_release);
+                after = reinterpret_cast<T*>(ptr.load(std::memory_order_acquire));
+            } while (after != before);
+            return after;
+        }
 
-inline void RegisterThread() {
-    std::lock_guard<std::mutex> guard(global.threads_lock);
-    if (registry != nullptr) {
-        throw std::runtime_error("RegisterThread called before UnregisterThread");
-    }
-    registry = new ThreadState;
-    registry->ptr = &hazard_ptr;
-    global.threads.insert(registry);
-}
+        void Retire(T* ptr) {
+            tstate_->retired_pointers[tstate_->retired_count++] = ptr;
+            if (tstate_->retired_count == BatchCap) {
+                manager_->Scan(tstate_);
+            }
+        }
 
-inline void UnregisterThread() {
-    std::lock_guard<std::mutex> guard(global.threads_lock);
-    if (registry == nullptr) {
-        throw std::runtime_error("UnregisterThread called before RegisterThread");
-    }
-    global.threads.erase(registry);
-    delete registry;
-    registry = nullptr;
-}
+    private:
+        Manager* manager_;
+        ThreadState* tstate_;
+    };
+};
 
-}  // namespace hazard
+// template<typename T>
+// auto* Hazard<T>::registry = nullptr;

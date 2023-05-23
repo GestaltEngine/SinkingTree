@@ -28,7 +28,6 @@ inline uintptr_t filter_ptr(void *ptr) {
 }  // namespace
 
 using namespace hashers;
-using namespace hazard;
 
 // declarations
 
@@ -99,11 +98,12 @@ public:
     std::optional<Value> Get(const Key &key);
     bool Erase(const Key &key);
 
-
     SinkingTree(const SinkingTree &other) = delete;
     SinkingTree operator=(const SinkingTree &other) = delete;
     SinkingTree(SinkingTree &&other) = delete;
     SinkingTree operator=(SinkingTree &&other) = delete;
+
+    void CleanupHazard();
 
 private:
     void Sink(int);
@@ -114,6 +114,8 @@ private:
     Hasher hasher_;
     std::array<Root *, kMaxSolidity_> old_roots_{};
     std::atomic<size_t> cell_count_[kMaxSolidity_]{};
+
+    Hazard<KV>::Manager manager_;
 };
 
 // definitions
@@ -121,7 +123,7 @@ private:
 template <class Key, class Value, class Hasher>
 SinkingTree<Key, Value, Hasher>::SinkingTree(size_t capacity, Hasher hasher) : hasher_(hasher) {
     size_t bit_count = 1;
-    size_t root_size = 2;
+    size_t root_size = 1 << bit_count;
     while (root_size < capacity) {
         root_size <<= 1;
         bit_count++;
@@ -137,9 +139,11 @@ SinkingTree<Key, Value, Hasher>::SinkingTree(size_t capacity, Hasher hasher) : h
 
 template <class Key, class Value, class Hasher>
 bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
+    auto mutator = manager_.MakeMutator();
+
     TreeTraverser traverser(key, hasher_);
     Root *root = root_.load(std::memory_order_acquire);
-    std::atomic<void *> *ptr2atomic = &(root->ptrs[traverser.Advance(root->bit_count)]);
+    std::atomic<void *> *ptr2atomic = &root->ptrs[traverser.Advance(root->bit_count)];
 
     void *desired = new KV{key, value};
     void *expected = ptr2atomic->load(std::memory_order_acquire);
@@ -150,10 +154,9 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
     InjectorState inj = InjectorState::kKeyValue;
     while (true) {
         do {
-            deliberate:
+        deliberate:
             auto acc = DeliberateState(expected);
             if (inj == InjectorState::kCell) {
-                Release();
                 Cell *discard = reinterpret_cast<Cell *>(filter_ptr(desired));
                 reinterpret_cast<std::atomic<void *> *>(discard)[migration_index].store(
                     nullptr, std::memory_order_relaxed);
@@ -163,18 +166,16 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
                 inj = InjectorState::kKeyValue;
             }
             if (acc == AcceptorState::kKeyValue) {
-                void *ptr = Acquire(ptr2atomic);
+                void *ptr = mutator.Protect(0, *ptr2atomic);
                 if (bits(ptr) & 1) {
-                    Release();
-                    ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(
-                        filter_ptr(ptr))[traverser.Advance()]);
+                    ptr2atomic = &reinterpret_cast<std::atomic<void *> *>(
+                        filter_ptr(ptr))[traverser.Advance()];
                     expected = ptr2atomic->load(std::memory_order_acquire);
                     goto deliberate;
                 } else {
                     KV *acc_ptr = reinterpret_cast<KV *>(ptr);
                     KV *inj_ptr = reinterpret_cast<KV *>(desired);
                     if (acc_ptr->key == inj_ptr->key) {
-                        Release();
                         expected = ptr;
                         continue;
                     }
@@ -192,8 +193,8 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
                     inj = InjectorState::kCell;
                 }
             } else if (acc == AcceptorState::kCell) {
-                ptr2atomic = &(reinterpret_cast<std::atomic<void *> *>(
-                    filter_ptr(expected))[traverser.Advance()]);
+                ptr2atomic = &reinterpret_cast<std::atomic<void *> *>(
+                    filter_ptr(expected))[traverser.Advance()];
                 expected = ptr2atomic->load(std::memory_order_acquire);
                 goto deliberate;
             } else {
@@ -204,7 +205,6 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
         if (second_extra == nullptr) {
             break;
         } else {
-            Release();
             int solidity = traverser.BitsConsumed();
             if (solidity <= kMaxSolidity_) {
                 auto before = cell_count_[solidity - 1].fetch_add(1);
@@ -213,8 +213,8 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
                     Sink(solidity);
                 }
             }
-            ptr2atomic = &(
-                reinterpret_cast<std::atomic<void *> *>(filter_ptr(desired))[traverser.Advance()]);
+            ptr2atomic = &
+                reinterpret_cast<std::atomic<void *> *>(filter_ptr(desired))[traverser.Advance()];
             expected = nullptr;
             desired = second_extra;
             second_extra = nullptr;
@@ -224,7 +224,7 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
 
     // cleanup the replaced KV if there is one
     if (expected != nullptr) {
-        Retire(reinterpret_cast<KV *>(expected));
+        mutator.Retire(reinterpret_cast<KV *>(expected));
         return false;
     }
     return true;
@@ -232,9 +232,11 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
 
 template <class Key, class Value, class Hasher>
 std::optional<Value> SinkingTree<Key, Value, Hasher>::Get(const Key &key) {
+    auto mutator = manager_.MakeMutator();
+
     Root *root = root_.load(std::memory_order_acquire);
     TreeTraverser traverser(key, hasher_);
-    std::atomic<void *> *ptr2atomic = &(root->ptrs[traverser.Advance(root->bit_count)]);
+    std::atomic<void *> *ptr2atomic = &root->ptrs[traverser.Advance(root->bit_count)];
     void *ptr = ptr2atomic->load(std::memory_order_acquire);
 
     while (true) {
@@ -243,18 +245,16 @@ std::optional<Value> SinkingTree<Key, Value, Hasher>::Get(const Key &key) {
         }
         if (bits(ptr) & 1) {
             ptr2atomic =
-                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.Advance()]);
+                &reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.Advance()];
             ptr = ptr2atomic->load(std::memory_order_acquire);
             continue;
         }
-        ptr = Acquire(ptr2atomic);
+        ptr = mutator.Protect(0, *ptr2atomic);
         if (ptr == nullptr) {
-            Release();
             return std::nullopt;
         } else if (bits(ptr) & 1) {
-            Release();
             ptr2atomic =
-                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.Advance()]);
+                &reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.Advance()];
             ptr = ptr2atomic->load(std::memory_order_acquire);
             continue;
         }
@@ -263,7 +263,6 @@ std::optional<Value> SinkingTree<Key, Value, Hasher>::Get(const Key &key) {
         if (kv->key == key) {
             ret_val = kv->value;
         }
-        Release();
         return ret_val;
     }
 }
@@ -281,9 +280,11 @@ AcceptorState SinkingTree<Key, Value, Hasher>::DeliberateState(void *expected) {
 
 template <class Key, class Value, class Hasher>
 bool SinkingTree<Key, Value, Hasher>::Erase(const Key &key) {
+    auto mutator = manager_.MakeMutator();
+
     TreeTraverser traverser(key, hasher_);
     Root *root = root_.load(std::memory_order_acquire);
-    std::atomic<void *> *ptr2atomic = &(root->ptrs[traverser.Advance(root->bit_count)]);
+    std::atomic<void *> *ptr2atomic = &root->ptrs[traverser.Advance(root->bit_count)];
     void *ptr = ptr2atomic->load(std::memory_order_acquire);
 
     while (true) {
@@ -292,34 +293,29 @@ bool SinkingTree<Key, Value, Hasher>::Erase(const Key &key) {
         }
         if (bits(ptr) & 1) {
             ptr2atomic =
-                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.Advance()]);
+                &reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.Advance()];
             ptr = ptr2atomic->load(std::memory_order_acquire);
             continue;
         }
-        ptr = Acquire(ptr2atomic);
+        ptr = mutator.Protect(0, *ptr2atomic);
         if (bits(ptr) & 1) {
-            Release();
             ptr2atomic =
-                &(reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.Advance()]);
+                &reinterpret_cast<std::atomic<void *> *>(filter_ptr(ptr))[traverser.Advance()];
             ptr = ptr2atomic->load(std::memory_order_acquire);
             continue;
         } else if (ptr == nullptr) {
-            Release();
             return false;
         } else {
             KV *kv = reinterpret_cast<KV *>(ptr);
             if (kv->key != key) {
-                Release();
                 return false;
             }
             bool cas_success =
                 ptr2atomic->compare_exchange_strong(ptr, nullptr, std::memory_order_acq_rel);
             if (cas_success) {
-                Release();
-                Retire(kv);
+                mutator.Retire(kv);
                 return true;
             }
-            Release();
         }
     }
 }
@@ -392,5 +388,10 @@ void SinkingTree<Key, Value, Hasher>::Sink(int solidity) {
     }
     root_.store(new_root, std::memory_order_release);
     old_roots_[solidity - 2] = root;
+}
+
+template <class Key, class Value, class Hasher>
+void SinkingTree<Key, Value, Hasher>::CleanupHazard() {
+    manager_.Cleanup();
 }
 }  // namespace sinking_tree

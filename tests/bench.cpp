@@ -20,11 +20,14 @@ TEST_CASE("Benchmark inserts") {
         (Catch::Benchmark::Chronometer meter) {
             SinkingTree<int, int> map(kNumIterations);
             meter.measure([thread_count, &map]() {
-                Runner runner{kNumIterations};
-                for (auto i : std::views::iota(0u, thread_count)) {
-                    Random rand{kSeed + 10 * i};
-                    runner.Do([&map, rand]() mutable { map.Put(rand(), 1); });
+                {
+                    Runner runner{kNumIterations};
+                    for (auto i : std::views::iota(0u, thread_count)) {
+                        Random rand{kSeed + 10 * i};
+                        runner.Do([&map, rand]() mutable { map.Put(rand(), 1); });
+                    }
                 }
+                map.CleanupHazard();
             });
         };
 
@@ -49,11 +52,14 @@ TEST_CASE("Benchmark inserts from default size") {
         (Catch::Benchmark::Chronometer meter) {
             SinkingTree<int, int> map;
             meter.measure([thread_count, &map]() {
-                Runner runner{kNumIterations};
-                for (auto i : std::views::iota(0u, thread_count)) {
-                    Random rand{kSeed + 10 * i};
-                    runner.Do([&map, rand]() mutable { map.Put(rand(), 1); });
+                {
+                    Runner runner{kNumIterations};
+                    for (auto i : std::views::iota(0u, thread_count)) {
+                        Random rand{kSeed + 10 * i};
+                        runner.Do([&map, rand]() mutable { map.Put(rand(), 1); });
+                    }
                 }
+                map.CleanupHazard();
             });
         };
 
@@ -80,17 +86,18 @@ TEST_CASE("Benchmark reads") {
                            std::to_string(kSize))
         (Catch::Benchmark::Chronometer meter) {
             SinkingTree<int, int> map(kNumIterations);
-            hazard::RegisterThread();
             for (int i = 0; i < kSize; ++i) {
                 map.Put(i, i);
             }
-            hazard::UnregisterThread();
             meter.measure([thread_count, &map]() {
-                Runner runner{kNumIterations};
-                for (auto i : std::views::iota(0u, thread_count)) {
-                    Random rand{kSeed + 10 * i};
-                    runner.Do([&map, rand]() mutable { map.Get(rand()); });
+                {
+                    Runner runner{kNumIterations};
+                    for (auto i : std::views::iota(0u, thread_count)) {
+                        Random rand{kSeed + 10 * i};
+                        runner.Do([&map, rand]() mutable { map.Get(rand()); });
+                    }
                 }
+                map.CleanupHazard();
             });
         };
 
