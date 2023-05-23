@@ -80,7 +80,7 @@ public:
             }
         }
 
-        void Cleanup () {
+        void Cleanup() {
             size_t threads = thread_counter_.load(std::memory_order_relaxed);
             for (size_t i = 0; i < threads; ++i) {
                 ThreadState* ts = thread_pointers_[i].load(std::memory_order_relaxed);
@@ -109,7 +109,8 @@ public:
         using AtomicPtr = std::atomic<V*>;
 
     public:
-        explicit Mutator(Manager* manager, ThreadState* tstate) : manager_(manager), tstate_(tstate) {
+        explicit Mutator(Manager* manager, ThreadState* tstate)
+            : manager_(manager), tstate_(tstate) {
         }
 
         template <typename V>
@@ -139,6 +140,3 @@ public:
         ThreadState* tstate_;
     };
 };
-
-// template<typename T>
-// auto* Hazard<T>::registry = nullptr;

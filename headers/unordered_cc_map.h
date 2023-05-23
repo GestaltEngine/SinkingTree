@@ -213,8 +213,8 @@ bool SinkingTree<Key, Value, Hasher>::Put(const Key &key, const Value &value) {
                     Sink(solidity);
                 }
             }
-            ptr2atomic = &
-                reinterpret_cast<std::atomic<void *> *>(filter_ptr(desired))[traverser.Advance()];
+            ptr2atomic =
+                &reinterpret_cast<std::atomic<void *> *>(filter_ptr(desired))[traverser.Advance()];
             expected = nullptr;
             desired = second_extra;
             second_extra = nullptr;
